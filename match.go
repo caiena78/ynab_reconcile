@@ -34,9 +34,16 @@ var dateLayouts = []string{
 	"02 Jan 2006",
 }
 
-func parseFlexibleDate(s string) (time.Time, error) {
+// parseFlexibleDate tries every known layout. A non-empty preferred layout is
+// tried first, which lets a mapping disambiguate formats the guesser would
+// otherwise read the wrong way round (e.g. day-first exports).
+func parseFlexibleDate(s string, preferred string) (time.Time, error) {
 	s = strings.TrimSpace(s)
-	for _, layout := range dateLayouts {
+	layouts := dateLayouts
+	if preferred != "" {
+		layouts = append([]string{preferred}, dateLayouts...)
+	}
+	for _, layout := range layouts {
 		if t, err := time.Parse(layout, s); err == nil {
 			return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.UTC), nil
 		}
@@ -44,32 +51,70 @@ func parseFlexibleDate(s string) (time.Time, error) {
 	return time.Time{}, fmt.Errorf("unrecognized date format: %q", s)
 }
 
+// readHeader returns a lookup of lower-cased, trimmed column name -> index,
+// so mappings can name columns without matching case exactly.
 func readHeader(reader *csv.Reader) (map[string]int, error) {
 	header, err := reader.Read()
 	if err != nil {
 		return nil, fmt.Errorf("reading CSV header: %w", err)
 	}
-	const utf8BOM = "\uFEFF"
+	const utf8BOM = string(rune(0xFEFF))
 	colIdx := map[string]int{}
 	for i, h := range header {
-		colIdx[strings.TrimSpace(strings.TrimPrefix(h, utf8BOM))] = i
+		clean := strings.TrimSpace(strings.TrimPrefix(h, utf8BOM))
+		colIdx[strings.ToLower(clean)] = i
 	}
 	return colIdx, nil
 }
 
+func lookupCol(colIdx map[string]int, name string) (int, bool) {
+	i, ok := colIdx[strings.ToLower(strings.TrimSpace(name))]
+	return i, ok
+}
+
+// headerNames lists the columns actually present, for error messages.
+func headerNames(colIdx map[string]int) string {
+	names := make([]string, len(colIdx))
+	for name, i := range colIdx {
+		if i < len(names) {
+			names[i] = name
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+// parseAmountField reads a currency cell, tolerating blanks, thousands
+// separators, currency symbols and accounting-style negatives like "(12.34)".
 func parseAmountField(s string) (float64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return 0, nil
 	}
-	return strconv.ParseFloat(s, 64)
+
+	negative := false
+	if strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")") {
+		negative = true
+		s = strings.TrimSuffix(strings.TrimPrefix(s, "("), ")")
+	}
+
+	s = strings.NewReplacer("$", "", ",", "", " ", "", string(rune(0x00A0)), "").Replace(s)
+	if s == "" || s == "-" {
+		return 0, nil
+	}
+
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return 0, err
+	}
+	if negative {
+		v = -v
+	}
+	return v, nil
 }
 
-// parseBankCSV auto-detects the export format and parses accordingly.
-// Supported formats:
-//   - Sam's Club style: "Posting Date", "Amount" (signed), "Description"
-//   - Citi style: "Date", "Description", "Debit", "Credit"
-func parseBankCSV(r io.Reader) ([]BankEntry, error) {
+// parseBankCSV parses an export using the given mapping. A nil mapping falls
+// back to sniffing the header row against the built-in mappings.
+func parseBankCSV(r io.Reader, m *Mapping) ([]BankEntry, error) {
 	reader := csv.NewReader(r)
 	reader.FieldsPerRecord = -1
 
@@ -78,26 +123,116 @@ func parseBankCSV(r io.Reader) ([]BankEntry, error) {
 		return nil, err
 	}
 
-	if _, ok := colIdx["Posting Date"]; ok {
-		if _, ok := colIdx["Amount"]; ok {
-			return readSamsStyleCSV(reader, colIdx)
+	if m == nil {
+		m, err = detectMapping(colIdx)
+		if err != nil {
+			return nil, err
 		}
 	}
-	if _, ok := colIdx["Debit"]; ok {
-		if _, ok := colIdx["Credit"]; ok {
-			return readCitiStyleCSV(reader, colIdx)
-		}
-	}
-	return nil, fmt.Errorf("unrecognized CSV format: expected either a \"Posting Date\"/\"Amount\" column pair or \"Debit\"/\"Credit\" columns")
+	return readMappedCSV(reader, colIdx, m)
 }
 
-// readSamsStyleCSV expects "Posting Date", "Amount" (signed), and "Description".
-func readSamsStyleCSV(reader *csv.Reader, colIdx map[string]int) ([]BankEntry, error) {
-	dateCol := colIdx["Posting Date"]
-	amountCol := colIdx["Amount"]
-	descCol, ok := colIdx["Description"]
+// detectMapping picks the first built-in mapping whose required columns are
+// all present, then falls back to a generic date+amount guess.
+func detectMapping(colIdx map[string]int) (*Mapping, error) {
+	for i := range builtinMappings {
+		if mappingFits(colIdx, &builtinMappings[i]) {
+			return &builtinMappings[i], nil
+		}
+	}
+
+	// Generic single-amount fallback: any recognizable date column paired
+	// with an "amount" column.
+	for _, dateName := range []string{"date", "transaction date", "posting date", "post date"} {
+		if _, ok := colIdx[dateName]; !ok {
+			continue
+		}
+		if _, ok := colIdx["amount"]; !ok {
+			continue
+		}
+		descName := ""
+		for _, d := range []string{"description", "payee", "name", "memo"} {
+			if _, ok := colIdx[d]; ok {
+				descName = d
+				break
+			}
+		}
+		return &Mapping{
+			Name:              "auto-detected",
+			DateColumn:        dateName,
+			DescriptionColumn: descName,
+			AmountMode:        AmountModeSingle,
+			AmountColumn:      "amount",
+		}, nil
+	}
+
+	return nil, fmt.Errorf("could not auto-detect this CSV layout (columns: %s) — pick or create a mapping for it", headerNames(colIdx))
+}
+
+// mappingFits reports whether every column a mapping requires is present.
+func mappingFits(colIdx map[string]int, m *Mapping) bool {
+	if _, ok := lookupCol(colIdx, m.DateColumn); !ok {
+		return false
+	}
+	switch m.AmountMode {
+	case AmountModeSingle:
+		_, ok := lookupCol(colIdx, m.AmountColumn)
+		return ok
+	case AmountModeDebitCredit:
+		_, debitOK := lookupCol(colIdx, m.DebitColumn)
+		_, creditOK := lookupCol(colIdx, m.CreditColumn)
+		return debitOK && creditOK
+	}
+	return false
+}
+
+// readMappedCSV reads the remaining rows using the column positions the
+// mapping names. Rows too short to hold every mapped column are skipped,
+// which drops the trailing blank lines some exports end with.
+func readMappedCSV(reader *csv.Reader, colIdx map[string]int, m *Mapping) ([]BankEntry, error) {
+	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+
+	dateCol, ok := lookupCol(colIdx, m.DateColumn)
 	if !ok {
-		return nil, fmt.Errorf(`CSV is missing required column "Description"`)
+		return nil, fmt.Errorf("mapping %q expects a %q column, but this file has: %s", m.Name, m.DateColumn, headerNames(colIdx))
+	}
+	maxCol := dateCol
+
+	descCol, hasDesc := -1, false
+	if m.DescriptionColumn != "" {
+		descCol, hasDesc = lookupCol(colIdx, m.DescriptionColumn)
+		if hasDesc && descCol > maxCol {
+			maxCol = descCol
+		}
+	}
+
+	var amountCol, debitCol, creditCol int
+	switch m.AmountMode {
+	case AmountModeSingle:
+		amountCol, ok = lookupCol(colIdx, m.AmountColumn)
+		if !ok {
+			return nil, fmt.Errorf("mapping %q expects an %q column, but this file has: %s", m.Name, m.AmountColumn, headerNames(colIdx))
+		}
+		if amountCol > maxCol {
+			maxCol = amountCol
+		}
+	case AmountModeDebitCredit:
+		debitCol, ok = lookupCol(colIdx, m.DebitColumn)
+		if !ok {
+			return nil, fmt.Errorf("mapping %q expects a %q column, but this file has: %s", m.Name, m.DebitColumn, headerNames(colIdx))
+		}
+		creditCol, ok = lookupCol(colIdx, m.CreditColumn)
+		if !ok {
+			return nil, fmt.Errorf("mapping %q expects a %q column, but this file has: %s", m.Name, m.CreditColumn, headerNames(colIdx))
+		}
+		if debitCol > maxCol {
+			maxCol = debitCol
+		}
+		if creditCol > maxCol {
+			maxCol = creditCol
+		}
 	}
 
 	var result []BankEntry
@@ -112,91 +247,50 @@ func readSamsStyleCSV(reader *csv.Reader, colIdx map[string]int) ([]BankEntry, e
 		}
 		rowNum++
 
-		maxCol := dateCol
-		if amountCol > maxCol {
-			maxCol = amountCol
-		}
-		if descCol > maxCol {
-			maxCol = descCol
-		}
 		if maxCol >= len(row) {
 			continue
 		}
+		if strings.TrimSpace(row[dateCol]) == "" {
+			continue
+		}
 
-		d, err := parseFlexibleDate(row[dateCol])
+		d, err := parseFlexibleDate(row[dateCol], m.DateLayout)
 		if err != nil {
 			return nil, fmt.Errorf("row %d: %w", rowNum, err)
 		}
-		amount, err := parseAmountField(row[amountCol])
-		if err != nil {
-			return nil, fmt.Errorf("row %d: invalid amount %q", rowNum, row[amountCol])
+
+		var amount float64
+		switch m.AmountMode {
+		case AmountModeSingle:
+			v, err := parseAmountField(row[amountCol])
+			if err != nil {
+				return nil, fmt.Errorf("row %d: invalid amount %q", rowNum, row[amountCol])
+			}
+			amount = v * m.amountMultiplier()
+		case AmountModeDebitCredit:
+			debit, err := parseAmountField(row[debitCol])
+			if err != nil {
+				return nil, fmt.Errorf("row %d: invalid debit %q", rowNum, row[debitCol])
+			}
+			credit, err := parseAmountField(row[creditCol])
+			if err != nil {
+				return nil, fmt.Errorf("row %d: invalid credit %q", rowNum, row[creditCol])
+			}
+			// Take the magnitude of each column so exports that already
+			// sign their credits and those that don't both land on YNAB's
+			// convention: negative for money out, positive for money in.
+			amount = math.Abs(debit)*m.debitMultiplier() + math.Abs(credit)*m.creditMultiplier()
+		}
+
+		desc := ""
+		if hasDesc {
+			desc = row[descCol]
 		}
 
 		result = append(result, BankEntry{
 			Date:        d,
 			Amount:      round2(amount),
-			Description: row[descCol],
-		})
-	}
-	return result, nil
-}
-
-// readCitiStyleCSV expects "Date", "Description", "Debit", "Credit". Debit is
-// an unsigned purchase amount; Credit is already negative-signed (refunds and
-// payments). The combined signed amount is -(debit + credit), which yields a
-// negative amount for purchases and a positive amount for refunds/payments \u2014
-// matching YNAB's sign convention for a credit card account.
-func readCitiStyleCSV(reader *csv.Reader, colIdx map[string]int) ([]BankEntry, error) {
-	dateCol, ok := colIdx["Date"]
-	if !ok {
-		return nil, fmt.Errorf(`CSV is missing required column "Date"`)
-	}
-	descCol, ok := colIdx["Description"]
-	if !ok {
-		return nil, fmt.Errorf(`CSV is missing required column "Description"`)
-	}
-	debitCol := colIdx["Debit"]
-	creditCol := colIdx["Credit"]
-
-	var result []BankEntry
-	rowNum := 1
-	for {
-		row, err := reader.Read()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("reading CSV row %d: %w", rowNum, err)
-		}
-		rowNum++
-
-		maxCol := dateCol
-		for _, c := range []int{descCol, debitCol, creditCol} {
-			if c > maxCol {
-				maxCol = c
-			}
-		}
-		if maxCol >= len(row) {
-			continue
-		}
-
-		d, err := parseFlexibleDate(row[dateCol])
-		if err != nil {
-			return nil, fmt.Errorf("row %d: %w", rowNum, err)
-		}
-		debit, err := parseAmountField(row[debitCol])
-		if err != nil {
-			return nil, fmt.Errorf("row %d: invalid debit %q", rowNum, row[debitCol])
-		}
-		credit, err := parseAmountField(row[creditCol])
-		if err != nil {
-			return nil, fmt.Errorf("row %d: invalid credit %q", rowNum, row[creditCol])
-		}
-
-		result = append(result, BankEntry{
-			Date:        d,
-			Amount:      round2(-(debit + credit)),
-			Description: row[descCol],
+			Description: desc,
 		})
 	}
 	return result, nil

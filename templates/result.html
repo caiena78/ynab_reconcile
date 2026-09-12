@@ -20,7 +20,7 @@
 </head>
 <body>
   <h1>Comparing account: {{.AccountName}}</h1>
-  <div class="meta">Bank file: {{.BankFile}} &middot; date range: {{.RangeStart}} to {{.RangeEnd}}</div>
+  <div class="meta">Bank file: {{.BankFile}} &middot; mapping: {{.MappingName}} &middot; date range: {{.RangeStart}} to {{.RangeEnd}}</div>
 
   <h2>In bank CSV but missing from YNAB <span class="count">({{len .MissingFromYnab}})</span></h2>
   {{if .MissingFromYnab}}

@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <title>YNAB vs Bank Compare</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; color: #222; }
     h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 0; }
     label { display: block; margin-top: 1rem; font-weight: 600; }
     select, input[type=text], input[type=number], input[type=file] {
       width: 100%; padding: 0.4rem; margin-top: 0.25rem; box-sizing: border-box;
@@ -18,17 +19,28 @@
       background: #2c6e49; color: #fff; border: none; border-radius: 4px; cursor: pointer;
     }
     button:hover { background: #23553a; }
+    button.secondary { background: #eee; color: #333; padding: 0.35rem 0.75rem; font-size: 0.85rem; margin-top: 0.5rem; }
+    button.secondary:hover { background: #ddd; }
+    button.danger { background: #fdecea; color: #7a1f1a; }
+    button.danger:hover { background: #f8d7d4; }
     .error { background: #fdecea; border: 1px solid #f5c2c0; color: #7a1f1a; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    .notice { background: #eaf5ee; border: 1px solid #b9dfc7; color: #1f5133; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    .card { border: 1px solid #ddd; border-radius: 6px; padding: 1rem 1.25rem 1.5rem; margin-top: 2rem; background: #fcfcfc; }
+    .row { display: flex; gap: 1rem; }
+    .row > div { flex: 1; }
+    .actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    code { background: #f2f2f2; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85em; }
     a.back { display: inline-block; margin-top: 1.5rem; font-size: 0.9rem; }
   </style>
 </head>
 <body>
   <h1>YNAB vs Bank Compare</h1>
-  <p>Step 2 of 2 — pick the YNAB account and the bank CSV to compare.</p>
+  <p>Step 2 of 2 — pick the YNAB account, the bank CSV, and the mapping that describes that CSV's columns.</p>
 
   {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+  {{if .Notice}}<div class="notice">{{.Notice}}</div>{{end}}
 
-  <form method="post" action="/compare" enctype="multipart/form-data">
+  <form id="compareForm" method="post" action="/compare" enctype="multipart/form-data">
     <input type="hidden" name="token" value="{{.Token}}">
     <input type="hidden" name="budgetID" value="{{.BudgetID}}">
 
@@ -42,13 +54,22 @@
       <option value="">-- none, upload below instead --</option>
       {{range .BankFiles}}<option value="{{.}}">{{.}}</option>{{end}}
     </select>
-    <div class="hint">Files found in the server's bank-CSV folder (set via BANK_CSV_DIR).</div>
+    <div class="hint">Files found in the server's bank-CSV folder (set via <code>BANK_CSV_DIR</code>).</div>
 
     <div class="or">— or —</div>
 
     <label for="bankcsvUpload">Upload a bank CSV</label>
     <input type="file" id="bankcsvUpload" name="bankcsvUpload" accept=".csv">
-    <div class="hint">If chosen, this overrides the dropdown above. Supports Sam's Club ("Posting Date"/"Amount") and Citi ("Debit"/"Credit") export formats.</div>
+    <div class="hint">If chosen, this overrides the dropdown above.</div>
+
+    <label for="mapping">Column mapping</label>
+    <select id="mapping" name="mapping">
+      <option value="">Auto-detect from the header row</option>
+      {{range .Mappings}}
+      <option value="{{.Name}}"{{if eq $.SelectedM .Name}} selected{{end}}>{{.Name}}{{if .Builtin}} (built-in){{end}}{{if .Description}} — {{.Description}}{{end}}</option>
+      {{end}}
+    </select>
+    <div class="hint">Saved as JSON in <code>{{.MappingDir}}</code> (set via <code>MAPPING_DIR</code>).</div>
 
     <label for="toleranceDays">Date tolerance (days)</label>
     <input type="number" id="toleranceDays" name="toleranceDays" value="{{.ToleranceDays}}" min="0" max="30">
@@ -56,6 +77,159 @@
     <button type="submit">Compare</button>
   </form>
 
-  <a class="back" href="/">&larr; Start over</a>
+  <!-- Sibling form so the Edit/Copy/Delete buttons can act on the selected
+       mapping without nesting forms, and without putting the token in a URL. -->
+  <form id="mappingActionForm" method="post">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <input type="hidden" name="budgetID" value="{{.BudgetID}}">
+    <input type="hidden" name="toleranceDays" id="actionTolerance" value="{{.ToleranceDays}}">
+    <input type="hidden" name="mapping" id="actionMapping" value="">
+    <input type="hidden" name="copyFrom" id="actionCopyFrom" value="">
+  </form>
+
+  <div class="actions">
+    <button class="secondary" type="button" onclick="mappingAction('/mappings/edit', false)">Edit selected mapping</button>
+    <button class="secondary" type="button" onclick="mappingAction('/mappings/edit', true)">Copy selected mapping</button>
+    <button class="secondary" type="button" onclick="newMapping()">New mapping</button>
+    <button class="secondary danger" type="button" onclick="deleteMapping()">Delete selected mapping</button>
+  </div>
+
+  {{if .Editing}}
+  {{$m := .Editing}}
+  <div class="card" id="editor">
+    <h2>{{if .EditingIsNew}}New mapping{{else}}Editing mapping{{end}}</h2>
+    <p class="hint">Name the CSV column that holds each field. Column names are matched ignoring case and surrounding spaces.</p>
+
+    <form method="post" action="/mappings/save">
+      <input type="hidden" name="token" value="{{.Token}}">
+      <input type="hidden" name="budgetID" value="{{.BudgetID}}">
+      <input type="hidden" name="toleranceDays" value="{{.ToleranceDays}}">
+      <input type="hidden" name="originalName" value="{{if .EditingIsNew}}{{else}}{{$m.Name}}{{end}}">
+
+      <div class="row">
+        <div>
+          <label for="name">Mapping name</label>
+          <input type="text" id="name" name="name" value="{{$m.Name}}" required>
+          <div class="hint">Becomes the filename, e.g. <code>chase.json</code>.</div>
+        </div>
+        <div>
+          <label for="description">Description</label>
+          <input type="text" id="description" name="description" value="{{$m.Description}}">
+        </div>
+      </div>
+
+      <div class="row">
+        <div>
+          <label for="dateColumn">Date column → YNAB date</label>
+          <input type="text" id="dateColumn" name="dateColumn" value="{{$m.DateColumn}}" required placeholder="Posting Date">
+        </div>
+        <div>
+          <label for="descriptionColumn">Description column → YNAB payee</label>
+          <input type="text" id="descriptionColumn" name="descriptionColumn" value="{{$m.DescriptionColumn}}" placeholder="Description">
+        </div>
+      </div>
+
+      <label for="amountMode">How is the amount stored?</label>
+      <select id="amountMode" name="amountMode" onchange="toggleAmountMode()">
+        <option value="single"{{if eq $m.AmountMode "single"}} selected{{end}}>One column with +/- values</option>
+        <option value="debit_credit"{{if eq $m.AmountMode "debit_credit"}} selected{{end}}>Two columns — debit and credit</option>
+      </select>
+
+      <div id="singleFields">
+        <label for="amountColumn">Amount column → YNAB amount</label>
+        <input type="text" id="amountColumn" name="amountColumn" value="{{$m.AmountColumn}}" placeholder="Amount">
+        <label style="font-weight: normal; margin-top: 0.6rem;">
+          <input type="checkbox" name="invertAmount" value="1"{{if $m.InvertAmount}} checked{{end}}>
+          Flip the sign — this export records purchases as positive numbers
+        </label>
+        <div class="hint">YNAB expects money out to be negative. Leave unchecked if purchases are already negative in the file.</div>
+      </div>
+
+      <div id="debitCreditFields">
+        <div class="row">
+          <div>
+            <label for="debitColumn">Debit column</label>
+            <input type="text" id="debitColumn" name="debitColumn" value="{{$m.DebitColumn}}" placeholder="Debit">
+            <label for="debitSign" style="font-weight: normal;">counts as</label>
+            <select id="debitSign" name="debitSign">
+              <option value="-1"{{if not (eq $m.DebitSign 1)}} selected{{end}}>money out (negative)</option>
+              <option value="1"{{if eq $m.DebitSign 1}} selected{{end}}>money in (positive)</option>
+            </select>
+          </div>
+          <div>
+            <label for="creditColumn">Credit column</label>
+            <input type="text" id="creditColumn" name="creditColumn" value="{{$m.CreditColumn}}" placeholder="Credit">
+            <label for="creditSign" style="font-weight: normal;">counts as</label>
+            <select id="creditSign" name="creditSign">
+              <option value="1"{{if not (eq $m.CreditSign -1)}} selected{{end}}>money in (positive)</option>
+              <option value="-1"{{if eq $m.CreditSign -1}} selected{{end}}>money out (negative)</option>
+            </select>
+          </div>
+        </div>
+        <div class="hint">Each column's magnitude is used, so exports that already write credits as negative and those that write them as positive both work with the defaults.</div>
+      </div>
+
+      <label for="dateLayout">Date layout (optional)</label>
+      <input type="text" id="dateLayout" name="dateLayout" value="{{$m.DateLayout}}" placeholder="01/02/2006">
+      <div class="hint">Go layout using the reference date <code>01/02/2006</code> (month/day/year). Leave blank to let the parser guess — set it only if your bank writes day-first dates.</div>
+
+      <button type="submit">Save mapping</button>
+    </form>
+  </div>
+  {{end}}
+
+  <a class="back" href="/">← Start over</a>
+
+  <script>
+    function mappingAction(action, asCopy) {
+      var name = document.getElementById('mapping').value;
+      if (!name) {
+        alert('Pick a mapping from the dropdown first (auto-detect has nothing to edit).');
+        return;
+      }
+      var form = document.getElementById('mappingActionForm');
+      document.getElementById('actionTolerance').value = document.getElementById('toleranceDays').value;
+      document.getElementById('actionMapping').value = asCopy ? '' : name;
+      document.getElementById('actionCopyFrom').value = asCopy ? name : '';
+      form.action = action;
+      form.submit();
+    }
+
+    function newMapping() {
+      var form = document.getElementById('mappingActionForm');
+      document.getElementById('actionTolerance').value = document.getElementById('toleranceDays').value;
+      document.getElementById('actionMapping').value = '';
+      document.getElementById('actionCopyFrom').value = '';
+      form.action = '/mappings/edit';
+      form.submit();
+    }
+
+    function deleteMapping() {
+      var name = document.getElementById('mapping').value;
+      if (!name) {
+        alert('Pick a saved mapping to delete.');
+        return;
+      }
+      if (!confirm('Delete the mapping "' + name + '"? The CSV files themselves are untouched.')) {
+        return;
+      }
+      var form = document.getElementById('mappingActionForm');
+      document.getElementById('actionMapping').value = name;
+      document.getElementById('actionCopyFrom').value = '';
+      form.action = '/mappings/delete';
+      form.submit();
+    }
+
+    function toggleAmountMode() {
+      var mode = document.getElementById('amountMode').value;
+      document.getElementById('singleFields').style.display = mode === 'single' ? '' : 'none';
+      document.getElementById('debitCreditFields').style.display = mode === 'debit_credit' ? '' : 'none';
+    }
+
+    if (document.getElementById('amountMode')) {
+      toggleAmountMode();
+      document.getElementById('editor').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  </script>
 </body>
 </html>

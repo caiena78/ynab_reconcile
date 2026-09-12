@@ -102,7 +102,7 @@ func (c *ynabClient) listTransactions(accountID string) ([]YnabEntry, error) {
 		if t.Deleted {
 			continue
 		}
-		d, err := parseFlexibleDate(t.Date)
+		d, err := parseFlexibleDate(t.Date, "2006-01-02")
 		if err != nil {
 			return nil, fmt.Errorf("parsing YNAB transaction date %q: %w", t.Date, err)
 		}
