@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"io"
+	"strings"
 	"testing"
 )
 
@@ -49,11 +51,37 @@ func TestTemplatesRender(t *testing.T) {
 	result := resultData{
 		AccountName: "Visa", BankFile: "a.csv", MappingName: "Citi",
 		RangeStart: "2026-01-01", RangeEnd: "2026-02-01",
-		MissingFromYnab: []BankEntry{{Amount: -1.23, Description: "x"}},
+		Token: "tok", BudgetID: "last-used",
+		AccountID:       "acct-1",
+		MissingFromYnab: []missingEntry{{Key: "m0", Date: "2026-01-15", Amount: -1.23, Description: "x", Payee: "x"}},
 		MissingFromBank: []YnabEntry{{Amount: 4.56, Payee: "y"}},
+		Categories: []CategoryGroup{
+			{Name: "Needs", Categories: []Category{{ID: "cat-1", Name: "Groceries"}}},
+		},
 	}
 	if err := templates.ExecuteTemplate(io.Discard, "result.html", result); err != nil {
 		t.Errorf("result.html: %v", err)
+	}
+
+	// With mismatches present, and with a token that would break out of the
+	// JS string if it were not escaped.
+	result.Token = `a"b</script><script>alert(1)</script>`
+	result.DateMismatches = []dateMismatch{
+		{YnabID: "id-1", BankDate: "2026-02-08", YnabDate: "2026-02-01",
+			Amount: -12.34, Description: "EXAMPLE STORE*A1B", Payee: "Example Store", DaysApart: 7},
+	}
+	var buf bytes.Buffer
+	if err := templates.ExecuteTemplate(&buf, "result.html", result); err != nil {
+		t.Fatalf("result.html with mismatches: %v", err)
+	}
+	out := buf.String()
+	for _, want := range []string{"Set to 2026-02-08", `data-id="id-1"`, "Update all 1 dates"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("rendered page is missing %q", want)
+		}
+	}
+	if strings.Contains(out, "<script>alert(1)</script>") {
+		t.Error("token was interpolated into the page unescaped")
 	}
 }
 

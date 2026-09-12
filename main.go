@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"embed"
+	"encoding/json"
 	"fmt"
 	"html/template"
 	"io"
@@ -49,14 +50,63 @@ type selectData struct {
 	ShowMappingBox bool
 }
 
+// dateMismatch is a pair the matcher is confident about — same amount, dates
+// within tolerance — whose dates nonetheless disagree. These are the rows the
+// results page offers to realign, by moving the YNAB date to the bank's.
+type dateMismatch struct {
+	YnabID      string
+	BankDate    string
+	YnabDate    string
+	Amount      float64
+	Description string
+	Payee       string
+	DaysApart   int
+
+	// Everything below is shown only when the row is expanded, so the pair
+	// can be eyeballed before anything is written to YNAB.
+	BankFields     []CSVField
+	YnabMemo       string
+	YnabCategory   string
+	YnabCleared    string
+	YnabApproved   bool
+	YnabImportDate string
+	// ImportDateAgrees reports whether the date the bank gave YNAB at import
+	// is the same date this CSV carries. When true, the pair is the same
+	// charge and the YNAB date was changed after import.
+	ImportDateAgrees bool
+}
+
+// missingEntry is a bank row with no YNAB counterpart — a candidate to add.
+// It carries the row's own key so the results page can address one row, and
+// the pre-filled payee the user is free to change before adding.
+type missingEntry struct {
+	Key         string
+	Date        string
+	Amount      float64
+	Description string
+	// Payee is what the payee box starts out holding: the bank's description,
+	// which is the only name the CSV actually gives us.
+	Payee  string
+	Fields []CSVField
+}
+
 type resultData struct {
 	AccountName     string
+	AccountID       string
 	BankFile        string
 	MappingName     string
 	RangeStart      string
 	RangeEnd        string
-	MissingFromYnab []BankEntry
+	Token           string
+	BudgetID        string
+	MissingFromYnab []missingEntry
 	MissingFromBank []YnabEntry
+	DateMismatches  []dateMismatch
+	Categories      []CategoryGroup
+	// CategoryError explains an empty dropdown when the category list could
+	// not be fetched. The comparison itself still stands, so this is a note
+	// on the page rather than a failed run.
+	CategoryError string
 }
 
 func main() {
@@ -66,6 +116,8 @@ func main() {
 	http.HandleFunc("/mappings/edit", handleMappingEdit)
 	http.HandleFunc("/mappings/save", handleMappingSave)
 	http.HandleFunc("/mappings/delete", handleMappingDelete)
+	http.HandleFunc("/update-date", handleUpdateDate)
+	http.HandleFunc("/add-transaction", handleAddTransaction)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -362,6 +414,137 @@ func handleMappingDelete(w http.ResponseWriter, r *http.Request) {
 	renderSelect(w, data)
 }
 
+// handleUpdateDate moves one YNAB transaction's date to the bank's date. It
+// speaks JSON so the results page can update a single row in place rather
+// than re-running the whole comparison, which would need the CSV again.
+//
+// This is the only endpoint that writes to YNAB.
+func handleUpdateDate(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	var req struct {
+		Token         string `json:"token"`
+		BudgetID      string `json:"budgetID"`
+		TransactionID string `json:"transactionID"`
+		Date          string `json:"date"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Could not read request: "+err.Error())
+		return
+	}
+
+	if req.Token == "" {
+		req.Token = os.Getenv("YNAB_TOKEN")
+	}
+	if req.Token == "" || req.TransactionID == "" || req.Date == "" {
+		writeJSONError(w, http.StatusBadRequest, "Missing token, transaction or date")
+		return
+	}
+	if req.BudgetID == "" {
+		req.BudgetID = envOr("YNAB_BUDGET_ID", "last-used")
+	}
+
+	newDate, err := parseFlexibleDate(req.Date, "2006-01-02")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	client := newYnabClient(req.Token, req.BudgetID)
+	finalDate, err := client.updateTransactionDate(req.TransactionID, newDate)
+	if err != nil {
+		log.Printf("Update of transaction %s failed: %v", req.TransactionID, err)
+		writeJSONError(w, http.StatusOK, err.Error())
+		return
+	}
+
+	log.Printf("Moved transaction %s to %s", req.TransactionID, finalDate)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "date": finalDate})
+}
+
+// handleAddTransaction creates one YNAB transaction from a bank CSV row the
+// comparison found no match for. Like /update-date it speaks JSON, so a row
+// can be added without re-running the comparison — which would need the CSV
+// uploaded again.
+//
+// The payee arrives as free text because the CSV's description is the only
+// name we have and it usually wants tidying. The category arrives as an id,
+// never a name: YNAB matches categories by id alone, so a typed name would be
+// silently dropped. An empty id means uncategorized, which is a real state in
+// YNAB and the default here.
+func handleAddTransaction(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if r.Method != http.MethodPost {
+		writeJSONError(w, http.StatusMethodNotAllowed, "POST required")
+		return
+	}
+
+	var req struct {
+		Token      string  `json:"token"`
+		BudgetID   string  `json:"budgetID"`
+		AccountID  string  `json:"accountID"`
+		Date       string  `json:"date"`
+		Amount     float64 `json:"amount"`
+		PayeeName  string  `json:"payeeName"`
+		CategoryID string  `json:"categoryID"`
+		Memo       string  `json:"memo"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSONError(w, http.StatusBadRequest, "Could not read request: "+err.Error())
+		return
+	}
+
+	if req.Token == "" {
+		req.Token = os.Getenv("YNAB_TOKEN")
+	}
+	if req.Token == "" || req.AccountID == "" || req.Date == "" {
+		writeJSONError(w, http.StatusBadRequest, "Missing token, account or date")
+		return
+	}
+	if req.Amount == 0 {
+		writeJSONError(w, http.StatusBadRequest, "A transaction needs a non-zero amount")
+		return
+	}
+	if req.BudgetID == "" {
+		req.BudgetID = envOr("YNAB_BUDGET_ID", "last-used")
+	}
+
+	date, err := parseFlexibleDate(req.Date, "2006-01-02")
+	if err != nil {
+		writeJSONError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	client := newYnabClient(req.Token, req.BudgetID)
+	id, err := client.createTransaction(newTransaction{
+		AccountID:  req.AccountID,
+		Date:       date,
+		Amount:     round2(req.Amount),
+		PayeeName:  req.PayeeName,
+		CategoryID: req.CategoryID,
+		Memo:       req.Memo,
+	})
+	if err != nil {
+		log.Printf("Adding transaction (%s, %.2f) failed: %v", req.Date, req.Amount, err)
+		writeJSONError(w, http.StatusOK, err.Error())
+		return
+	}
+
+	log.Printf("Added transaction %s: %s %.2f %q", id, req.Date, req.Amount, req.PayeeName)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "id": id})
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": msg})
+}
+
 // mappingFromForm builds a Mapping out of the editor's fields.
 func mappingFromForm(r *http.Request) *Mapping {
 	m := &Mapping{
@@ -483,11 +666,12 @@ func runComparison(token, budgetID, accountID, mappingName string, toleranceDays
 			newest = e.Date
 		}
 	}
-	// Only compare against YNAB transactions that fall within the CSV's own
-	// date range — the tolerance is used solely to decide whether a bank
-	// entry and a YNAB entry inside that range are "close enough" to match.
-	rangeStart := oldest
-	rangeEnd := newest
+	// Match against YNAB transactions in the CSV's own date range widened by
+	// the tolerance: a date mismatch means the YNAB date sits outside that
+	// range by up to toleranceDays, so clipping to the range exactly would
+	// discard the very candidates we exist to report.
+	matchStart := oldest.AddDate(0, 0, -toleranceDays)
+	matchEnd := newest.AddDate(0, 0, toleranceDays)
 
 	client := newYnabClient(token, budgetID)
 
@@ -513,36 +697,93 @@ func runComparison(token, budgetID, accountID, mappingName string, toleranceDays
 
 	filtered := ynabEntries[:0:0]
 	for _, e := range ynabEntries {
-		if !e.Date.Before(rangeStart) && !e.Date.After(rangeEnd) {
+		if !e.Date.Before(matchStart) && !e.Date.After(matchEnd) {
 			filtered = append(filtered, e)
 		}
 	}
 	ynabEntries = filtered
 
-	bankMatched, ynabMatched := matchEntries(bankEntries, ynabEntries, toleranceDays)
+	pairs, ynabMatched := matchEntries(bankEntries, ynabEntries, toleranceDays)
 
-	var missingFromYnab []BankEntry
-	for i, matched := range bankMatched {
-		if !matched {
-			missingFromYnab = append(missingFromYnab, bankEntries[i])
+	var missingFromYnab []missingEntry
+	var mismatches []dateMismatch
+	for i, j := range pairs {
+		if j == -1 {
+			b := bankEntries[i]
+			missingFromYnab = append(missingFromYnab, missingEntry{
+				Key:         fmt.Sprintf("m%d", i),
+				Date:        b.Date.Format("2006-01-02"),
+				Amount:      b.Amount,
+				Description: b.Description,
+				Payee:       strings.Join(strings.Fields(b.Description), " "),
+				Fields:      b.Fields,
+			})
+			continue
 		}
+		b, y := bankEntries[i], ynabEntries[j]
+		if b.Date.Equal(y.Date) {
+			continue
+		}
+		days := int(b.Date.Sub(y.Date).Hours() / 24)
+		if days < 0 {
+			days = -days
+		}
+		bankDate := b.Date.Format("2006-01-02")
+		mismatches = append(mismatches, dateMismatch{
+			YnabID:           y.ID,
+			BankDate:         bankDate,
+			YnabDate:         y.Date.Format("2006-01-02"),
+			Amount:           b.Amount,
+			Description:      b.Description,
+			Payee:            y.Payee,
+			DaysApart:        days,
+			BankFields:       b.Fields,
+			YnabMemo:         y.Memo,
+			YnabCategory:     y.Category,
+			YnabCleared:      y.Cleared,
+			YnabApproved:     y.Approved,
+			YnabImportDate:   y.ImportDate,
+			ImportDateAgrees: y.ImportDate != "" && y.ImportDate == bankDate,
+		})
 	}
 
 	var missingFromBank []YnabEntry
 	for i, matched := range ynabMatched {
-		if !matched {
-			missingFromBank = append(missingFromBank, ynabEntries[i])
+		if matched {
+			continue
 		}
+		// Report only entries the CSV actually covers. One pulled in by the
+		// widened window alone isn't missing from the bank — the export just
+		// doesn't reach its date.
+		if ynabEntries[i].Date.Before(oldest) || ynabEntries[i].Date.After(newest) {
+			continue
+		}
+		missingFromBank = append(missingFromBank, ynabEntries[i])
+	}
+
+	// A failed category fetch must not sink the comparison: the dropdown goes
+	// empty and the page says why, but the results are still worth showing.
+	categories, err := client.listCategories()
+	categoryError := ""
+	if err != nil {
+		log.Printf("Could not load categories: %v", err)
+		categoryError = "Categories could not be loaded (" + err.Error() + "), so transactions can only be added uncategorized."
 	}
 
 	return &resultData{
 		AccountName:     accountName,
+		AccountID:       accountID,
+		Categories:      categories,
+		CategoryError:   categoryError,
 		BankFile:        bankFileLabel,
 		MappingName:     mappingLabel,
 		RangeStart:      oldest.Format("2006-01-02"),
 		RangeEnd:        newest.Format("2006-01-02"),
+		Token:           token,
+		BudgetID:        budgetID,
 		MissingFromYnab: missingFromYnab,
 		MissingFromBank: missingFromBank,
+		DateMismatches:  mismatches,
 	}, nil
 }
 

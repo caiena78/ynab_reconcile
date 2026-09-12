@@ -10,8 +10,9 @@ JSON file that says which CSV column holds the date, the amount, and the
 description. Mappings are created and edited in the app and saved to a folder
 of your choosing.
 
-Everything runs on your own machine. The only network call is a read-only
-request to the YNAB API.
+Everything runs on your own machine. The only network calls are to the YNAB
+API: reads to fetch your accounts and transactions, and one write — moving a
+transaction's date — which happens only when you click a button to do it.
 
 ## Prerequisites
 
@@ -33,8 +34,9 @@ The app authenticates to YNAB with a Personal Access Token (PAT).
 A few things worth knowing about the token:
 
 - It grants full read *and* write access to every budget on your account.
-  This app only ever issues `GET` requests, but treat the token like a
-  password anyway.
+  This app reads freely but writes only one thing, only on an explicit click:
+  a transaction's date (see [Realigning dates](#realigning-dates)). Treat the
+  token like a password.
 - It does not expire, so revoke it from the same screen when you're done
   using it, or if it's ever exposed.
 - Do not commit it. The app never writes it to disk.
@@ -89,6 +91,61 @@ click **Load accounts**.
 YNAB transactions outside that window are never reported as missing. Each bank
 entry is paired with the unmatched YNAB entry of the same amount whose date is
 closest, so repeated identical amounts don't mismatch.
+
+The page has three sections: pairs that matched but carry different dates,
+bank rows with no YNAB match, and YNAB rows with no bank match.
+
+## Realigning dates
+
+Transactions match on amount and date-within-tolerance — the description is
+never compared. So a pair can be confidently the same transaction and still
+disagree on the date, usually because YNAB holds the order date (or the date
+you typed it in) while the bank holds the date it posted.
+
+Those pairs get their own section at the top of the results, with the two
+dates, how far apart they are, and two buttons per row:
+
+> **Compare** — expands the row to show both transactions in full, side by
+> side, so you can confirm they really are the same charge.
+>
+> **Set to 2026-02-08** — writes the bank's date onto the YNAB transaction.
+
+### Verifying a pair before updating
+
+**Compare** opens a panel showing the complete CSV row on the left — every
+populated column, including ones no mapping uses, such as a reference number
+or the bank's own category — and the YNAB transaction on the right, with its
+payee, category, memo, cleared state and approval.
+
+Above them is a one-line verdict on how strong the match is. The decisive
+evidence is YNAB's `import_id`: transactions brought in by direct import carry
+an id shaped `YNAB:[milliunits]:[date]:[n]`, where the date is what the bank
+reported at import. The app pulls that out and compares it with the CSV:
+
+- **"Same charge"** — the bank date recorded at import is the date in this
+  CSV, so the pair is certainly the same transaction and the YNAB date was
+  edited afterwards. Safe to update.
+- **Bank date at import differs** — still matched on amount, but check the two
+  sides before updating.
+- **"Entered by hand"** — the YNAB transaction was never imported, so there is
+  no bank date on it to confirm against. Amount and proximity are all the
+  evidence there is; read both sides.
+
+There's also an **Update all** button that walks the list one request at a
+time. This is the only write the app makes to your budget.
+
+Before writing, the app re-reads the transaction and sends every other field
+back unchanged, so a memo, category, payee or cleared flag can't be lost in
+the update. Two cases are handled explicitly:
+
+- **Splits are refused.** YNAB ignores a date change on a split transaction
+  and still returns success, so the app checks first and tells you instead of
+  reporting a write that silently did nothing.
+- **The result is verified.** The app compares the date YNAB echoes back
+  against what it asked for, and reports a failure if they differ.
+
+Realigning dates is also the cheapest way to reduce noise in future runs: once
+the dates agree, those rows match at any tolerance.
 
 ## Mapping files
 

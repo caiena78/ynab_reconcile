@@ -2,5 +2,14 @@
 *.csv
 *.CSV
 
-# Built binaries
+# Built binaries, and the editor/Go backup copies of them that a bare
+# "*.exe" does not match
 *.exe
+*.exe~
+*.exe.*
+ynabv2
+ynabv2.test
+
+# Saved column mappings default to ./mappings, which puts user configuration
+# inside the repo. Set MAPPING_DIR to move them elsewhere.
+/mappings/

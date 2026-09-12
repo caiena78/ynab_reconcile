@@ -10,10 +10,19 @@ import (
 	"time"
 )
 
+// CSVField is one cell of the original bank row, kept in file order so the
+// whole row can be shown back to the user when they verify a match.
+type CSVField struct {
+	Name  string
+	Value string
+}
+
 type BankEntry struct {
 	Date        time.Time
 	Amount      float64
 	Description string
+	// Fields is the source row, non-empty cells only.
+	Fields []CSVField
 }
 
 func round2(v float64) float64 {
@@ -52,19 +61,22 @@ func parseFlexibleDate(s string, preferred string) (time.Time, error) {
 }
 
 // readHeader returns a lookup of lower-cased, trimmed column name -> index,
-// so mappings can name columns without matching case exactly.
-func readHeader(reader *csv.Reader) (map[string]int, error) {
+// so mappings can name columns without matching case exactly, plus the column
+// names in their original spelling and file order for display.
+func readHeader(reader *csv.Reader) (map[string]int, []string, error) {
 	header, err := reader.Read()
 	if err != nil {
-		return nil, fmt.Errorf("reading CSV header: %w", err)
+		return nil, nil, fmt.Errorf("reading CSV header: %w", err)
 	}
 	const utf8BOM = string(rune(0xFEFF))
 	colIdx := map[string]int{}
+	names := make([]string, 0, len(header))
 	for i, h := range header {
 		clean := strings.TrimSpace(strings.TrimPrefix(h, utf8BOM))
 		colIdx[strings.ToLower(clean)] = i
+		names = append(names, clean)
 	}
-	return colIdx, nil
+	return colIdx, names, nil
 }
 
 func lookupCol(colIdx map[string]int, name string) (int, bool) {
@@ -118,7 +130,7 @@ func parseBankCSV(r io.Reader, m *Mapping) ([]BankEntry, error) {
 	reader := csv.NewReader(r)
 	reader.FieldsPerRecord = -1
 
-	colIdx, err := readHeader(reader)
+	colIdx, names, err := readHeader(reader)
 	if err != nil {
 		return nil, err
 	}
@@ -129,7 +141,7 @@ func parseBankCSV(r io.Reader, m *Mapping) ([]BankEntry, error) {
 			return nil, err
 		}
 	}
-	return readMappedCSV(reader, colIdx, m)
+	return readMappedCSV(reader, colIdx, names, m)
 }
 
 // detectMapping picks the first built-in mapping whose required columns are
@@ -189,7 +201,7 @@ func mappingFits(colIdx map[string]int, m *Mapping) bool {
 // readMappedCSV reads the remaining rows using the column positions the
 // mapping names. Rows too short to hold every mapped column are skipped,
 // which drops the trailing blank lines some exports end with.
-func readMappedCSV(reader *csv.Reader, colIdx map[string]int, m *Mapping) ([]BankEntry, error) {
+func readMappedCSV(reader *csv.Reader, colIdx map[string]int, names []string, m *Mapping) ([]BankEntry, error) {
 	if err := m.Validate(); err != nil {
 		return nil, err
 	}
@@ -287,10 +299,23 @@ func readMappedCSV(reader *csv.Reader, colIdx map[string]int, m *Mapping) ([]Ban
 			desc = row[descCol]
 		}
 
+		// Keep the source row so the user can inspect every column when
+		// verifying a match. Blank cells are dropped as noise.
+		fields := make([]CSVField, 0, len(names))
+		for k, name := range names {
+			if k >= len(row) {
+				break
+			}
+			if v := strings.TrimSpace(row[k]); v != "" {
+				fields = append(fields, CSVField{Name: name, Value: v})
+			}
+		}
+
 		result = append(result, BankEntry{
 			Date:        d,
 			Amount:      round2(amount),
 			Description: desc,
+			Fields:      fields,
 		})
 	}
 	return result, nil
@@ -320,8 +345,15 @@ func amountsEqual(a, b float64) bool {
 // date (rather than just the first candidate encountered) avoids
 // order-dependent mismatches when the same amount appears more than once on
 // either side within the comparison window.
-func matchEntries(bankEntries []BankEntry, ynabEntries []YnabEntry, toleranceDays int) (bankMatched, ynabMatched []bool) {
-	bankMatched = make([]bool, len(bankEntries))
+//
+// pairs[i] is the index of the YNAB entry that bank entry i matched, or -1 if
+// it matched nothing. Callers need the pairing itself, not just whether a
+// match happened, to report pairs whose dates disagree.
+func matchEntries(bankEntries []BankEntry, ynabEntries []YnabEntry, toleranceDays int) (pairs []int, ynabMatched []bool) {
+	pairs = make([]int, len(bankEntries))
+	for i := range pairs {
+		pairs[i] = -1
+	}
 	ynabMatched = make([]bool, len(ynabEntries))
 
 	for i, b := range bankEntries {
@@ -344,9 +376,9 @@ func matchEntries(bankEntries []BankEntry, ynabEntries []YnabEntry, toleranceDay
 			}
 		}
 		if best != -1 {
-			bankMatched[i] = true
+			pairs[i] = best
 			ynabMatched[best] = true
 		}
 	}
-	return bankMatched, ynabMatched
+	return pairs, ynabMatched
 }

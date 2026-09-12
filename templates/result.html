@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <title>Compare Results</title>
   <style>
-    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    body { font-family: system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; color: #222; }
     h1 { font-size: 1.4rem; }
     h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 2px solid #eee; padding-bottom: 0.3rem; }
     .meta { color: #555; margin-bottom: 1.5rem; }
@@ -13,8 +13,42 @@
     th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; font-size: 0.92rem; }
     th { background: #fafafa; }
     .amount { text-align: right; font-variant-numeric: tabular-nums; }
+    .date { font-variant-numeric: tabular-nums; white-space: nowrap; }
     .empty { color: #2c6e49; font-style: italic; padding: 0.5rem 0; }
     .count { color: #888; font-weight: normal; }
+    .hint { color: #666; font-size: 0.85rem; margin: 0.4rem 0 0.8rem; }
+    button.fix {
+      padding: 0.3rem 0.7rem; font-size: 0.82rem; cursor: pointer;
+      background: #2c6e49; color: #fff; border: none; border-radius: 4px; white-space: nowrap;
+    }
+    button.fix:hover { background: #23553a; }
+    button.fix:disabled { background: #ccc; cursor: default; }
+    button.all { margin-bottom: 0.5rem; }
+    .done { color: #2c6e49; font-size: 0.85rem; white-space: nowrap; }
+    .failed { color: #7a1f1a; font-size: 0.85rem; }
+    tr.updated td { background: #f4faf6; }
+    button.toggle {
+      padding: 0.25rem 0.5rem; font-size: 0.78rem; cursor: pointer;
+      background: #fff; color: #444; border: 1px solid #ccc; border-radius: 4px; white-space: nowrap;
+    }
+    button.toggle:hover { background: #f0f0f0; }
+    tr.detail td { background: #fbfbfb; border-bottom: 2px solid #e5e5e5; }
+    .why { font-size: 0.88rem; color: #444; margin-bottom: 0.8rem; line-height: 1.45; }
+    .compare { display: flex; gap: 2rem; flex-wrap: wrap; }
+    .side { flex: 1; min-width: 250px; }
+    .side h4 { margin: 0 0 0.4rem; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.04em; color: #777; }
+    .side dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 0.15rem 0.75rem; }
+    .side dt { color: #777; font-size: 0.85rem; }
+    .side dd { margin: 0; font-size: 0.85rem; word-break: break-word; }
+    tr.added td { background: #f4faf6; }
+    .desc { color: #555; font-size: 0.85rem; word-break: break-word; }
+    .payeebox, .catbox {
+      font: inherit; font-size: 0.85rem; padding: 0.25rem 0.35rem;
+      border: 1px solid #ccc; border-radius: 4px; background: #fff; max-width: 15rem;
+    }
+    .payeebox { width: 11rem; }
+    .catbox { max-width: 13rem; }
+    .payeebox:disabled, .catbox:disabled { background: #f4f4f4; color: #666; }
     a.back { display: inline-block; margin-top: 2rem; }
   </style>
 </head>
@@ -22,14 +56,140 @@
   <h1>Comparing account: {{.AccountName}}</h1>
   <div class="meta">Bank file: {{.BankFile}} &middot; mapping: {{.MappingName}} &middot; date range: {{.RangeStart}} to {{.RangeEnd}}</div>
 
-  <h2>In bank CSV but missing from YNAB <span class="count">({{len .MissingFromYnab}})</span></h2>
-  {{if .MissingFromYnab}}
+  {{if .DateMismatches}}
+  <h2>Matched, but dated differently <span class="count">({{len .DateMismatches}})</span></h2>
+  <p class="hint">
+    These pairs agree on amount and are close enough in date to be confidently
+    the same transaction. Updating writes the bank's date to YNAB &mdash; the only
+    change this app ever makes to your budget. Nothing else on the transaction
+    is touched.
+  </p>
+  <button class="fix all" type="button" onclick="updateAll()">Update all {{len .DateMismatches}} dates in YNAB</button>
   <table>
-    <tr><th>Date</th><th class="amount">Amount</th><th>Description</th></tr>
-    {{range .MissingFromYnab}}
-    <tr><td>{{.Date}}</td><td class="amount">{{printf "%.2f" .Amount}}</td><td>{{.Description}}</td></tr>
+    <tr>
+      <th></th>
+      <th>Bank date</th><th>YNAB date</th><th class="amount">Amount</th>
+      <th>Apart</th><th>Bank description</th><th>YNAB payee</th><th></th>
+    </tr>
+    {{range .DateMismatches}}
+    <tr id="row-{{.YnabID}}">
+      <td>
+        <button class="toggle" type="button" id="toggle-{{.YnabID}}"
+                data-target="{{.YnabID}}"
+                aria-expanded="false"
+                onclick="toggleDetail(this.dataset.target)">Compare</button>
+      </td>
+      <td class="date">{{.BankDate}}</td>
+      <td class="date" id="ynabdate-{{.YnabID}}">{{.YnabDate}}</td>
+      <td class="amount">{{printf "%.2f" .Amount}}</td>
+      <td>{{.DaysApart}}d</td>
+      <td>{{.Description}}</td>
+      <td>{{.Payee}}</td>
+      <td>
+        <button class="fix" type="button"
+                id="btn-{{.YnabID}}"
+                data-id="{{.YnabID}}"
+                data-date="{{.BankDate}}"
+                onclick="updateOne(this.dataset.id, this.dataset.date)">
+          Set to {{.BankDate}}
+        </button>
+      </td>
+    </tr>
+    <tr class="detail" id="detail-{{.YnabID}}" hidden>
+      <td colspan="8">
+        <div class="why">
+          {{if .ImportDateAgrees}}
+          <strong>Same charge.</strong> YNAB imported this transaction with the
+          bank's date of {{.YnabImportDate}}, which is the date in this CSV.
+          Its date was changed to {{.YnabDate}} afterwards.
+          {{else if .YnabImportDate}}
+          Matched on amount. YNAB imported this with the bank date
+          {{.YnabImportDate}}, while this CSV row is dated {{.BankDate}} —
+          check the two sides below before updating.
+          {{else}}
+          Matched on amount, {{.DaysApart}} day(s) apart. This YNAB
+          transaction was entered by hand, not imported, so there is no bank
+          date recorded on it to confirm against.
+          {{end}}
+        </div>
+        <div class="compare">
+          <div class="side">
+            <h4>Bank CSV row</h4>
+            <dl>
+              {{range .BankFields}}
+              <dt>{{.Name}}</dt><dd>{{.Value}}</dd>
+              {{end}}
+            </dl>
+          </div>
+          <div class="side">
+            <h4>YNAB transaction</h4>
+            <dl>
+              <dt>Date</dt><dd>{{.YnabDate}}</dd>
+              <dt>Amount</dt><dd>{{printf "%.2f" .Amount}}</dd>
+              <dt>Payee</dt><dd>{{if .Payee}}{{.Payee}}{{else}}—{{end}}</dd>
+              {{if .YnabCategory}}<dt>Category</dt><dd>{{.YnabCategory}}</dd>{{end}}
+              {{if .YnabMemo}}<dt>Memo</dt><dd>{{.YnabMemo}}</dd>{{end}}
+              {{if .YnabCleared}}<dt>Cleared</dt><dd>{{.YnabCleared}}</dd>{{end}}
+              <dt>Approved</dt><dd>{{if .YnabApproved}}yes{{else}}no{{end}}</dd>
+              {{if .YnabImportDate}}<dt>Bank date at import</dt><dd>{{.YnabImportDate}}</dd>{{end}}
+            </dl>
+          </div>
+        </div>
+      </td>
+    </tr>
     {{end}}
   </table>
+  {{end}}
+
+  <h2>In bank CSV but missing from YNAB <span class="count">({{len .MissingFromYnab}})</span></h2>
+  {{if .MissingFromYnab}}
+  <p class="hint">
+    These bank rows have no YNAB counterpart. Adding one creates it in
+    <strong>{{.AccountName}}</strong> on the bank's date and amount, marked
+    cleared. Edit the payee and pick a category first — the payee starts as the
+    bank's raw description, which is rarely what you want it called.
+  </p>
+  {{if .CategoryError}}<div class="warning">{{.CategoryError}}</div>{{end}}
+  <p class="hint">
+    Each add carries an import id built from the amount and date, the same one
+    a bank import would use, so the same charge cannot be posted twice — not by
+    clicking again, and not by your bank's own import delivering it later.
+  </p>
+  <button class="fix all" type="button" onclick="addAll()">Add all {{len .MissingFromYnab}} to YNAB</button>
+  <table>
+    <tr>
+      <th>Date</th><th class="amount">Amount</th><th>Bank description</th>
+      <th>Payee</th><th>Category</th><th></th>
+    </tr>
+    {{range .MissingFromYnab}}
+    <tr id="add-row-{{.Key}}">
+      <td class="date">{{.Date}}</td>
+      <td class="amount">{{printf "%.2f" .Amount}}</td>
+      <td class="desc">{{.Description}}</td>
+      <td><input type="text" class="payeebox" id="payee-{{.Key}}" value="{{.Payee}}" maxlength="200" aria-label="Payee"></td>
+      <td><select class="catbox" id="cat-{{.Key}}" aria-label="Category"></select></td>
+      <td>
+        <button class="fix" type="button"
+                id="addbtn-{{.Key}}"
+                data-key="{{.Key}}"
+                data-date="{{.Date}}"
+                data-amount="{{printf "%.2f" .Amount}}"
+                onclick="addOne(this.dataset.key)">Add to YNAB</button>
+      </td>
+    </tr>
+    {{end}}
+  </table>
+
+  <!-- Rendered once and cloned into every row's select, rather than repeating
+       the whole category list for each row. -->
+  <template id="category-options">
+    <option value="">— Uncategorized —</option>
+    {{range .Categories}}
+    <optgroup label="{{.Name}}">
+      {{range .Categories}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+    </optgroup>
+    {{end}}
+  </template>
   {{else}}
   <div class="empty">Nothing missing — every bank entry has a matching YNAB transaction.</div>
   {{end}}
@@ -39,13 +199,191 @@
   <table>
     <tr><th>Date</th><th class="amount">Amount</th><th>Payee</th><th>Memo</th></tr>
     {{range .MissingFromBank}}
-    <tr><td>{{.Date}}</td><td class="amount">{{printf "%.2f" .Amount}}</td><td>{{.Payee}}</td><td>{{.Memo}}</td></tr>
+    <tr><td class="date">{{.Date.Format "2006-01-02"}}</td><td class="amount">{{printf "%.2f" .Amount}}</td><td>{{.Payee}}</td><td>{{.Memo}}</td></tr>
     {{end}}
   </table>
   {{else}}
   <div class="empty">Nothing missing — every YNAB transaction in range has a matching bank entry.</div>
   {{end}}
 
-  <a class="back" href="/">&larr; Run another comparison</a>
+  <a class="back" href="/">← Run another comparison</a>
+
+  <script>
+    var TOKEN = {{.Token}};
+    var BUDGET_ID = {{.BudgetID}};
+    var ACCOUNT_ID = {{.AccountID}};
+
+    // The category list is rendered once into a <template> and cloned into
+    // every row, so a long list costs one copy in the HTML instead of one per
+    // missing transaction.
+    (function fillCategories() {
+      var tpl = document.getElementById('category-options');
+      if (!tpl) { return; }
+      var boxes = document.querySelectorAll('select.catbox');
+      for (var i = 0; i < boxes.length; i++) {
+        boxes[i].appendChild(tpl.content.cloneNode(true));
+      }
+    })();
+
+    function toggleDetail(id) {
+      var row = document.getElementById('detail-' + id);
+      var btn = document.getElementById('toggle-' + id);
+      row.hidden = !row.hidden;
+      btn.textContent = row.hidden ? 'Compare' : 'Hide';
+      btn.setAttribute('aria-expanded', row.hidden ? 'false' : 'true');
+    }
+
+    function setCell(id, text, cls) {
+      var cell = document.getElementById('btn-' + id).parentNode;
+      cell.innerHTML = '<span class="' + cls + '"></span>';
+      cell.firstChild.textContent = text;
+    }
+
+    function updateOne(id, date) {
+      var btn = document.getElementById('btn-' + id);
+      // A row already updated on its own has had its button replaced. That is
+      // done, not failed, so Update all must not count it against the total.
+      if (!btn) { return Promise.resolve(true); }
+      if (btn.disabled) { return Promise.resolve(true); }
+      btn.disabled = true;
+      btn.textContent = 'Updating...';
+
+      return fetch('/update-date', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: TOKEN, budgetID: BUDGET_ID, transactionID: id, date: date
+        })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (res.ok) {
+          document.getElementById('ynabdate-' + id).textContent = res.date;
+          document.getElementById('row-' + id).classList.add('updated');
+          setCell(id, 'Updated', 'done');
+          return true;
+        }
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        var cell = btn.parentNode;
+        var msg = cell.querySelector('.failed');
+        if (!msg) {
+          msg = document.createElement('div');
+          msg.className = 'failed';
+          cell.appendChild(msg);
+        }
+        msg.textContent = res.error || 'Update failed';
+        return false;
+      }).catch(function (err) {
+        btn.disabled = false;
+        btn.textContent = 'Retry';
+        return false;
+      });
+    }
+
+    // Sequential rather than parallel: one failure shouldn't be buried in a
+    // burst of requests, and YNAB rate-limits per hour.
+    function updateAll() {
+      var buttons = Array.prototype.slice.call(document.querySelectorAll('button.fix[data-id]'));
+      var all = document.querySelector('button.all');
+      all.disabled = true;
+      all.textContent = 'Updating...';
+
+      var chain = Promise.resolve();
+      var failures = 0;
+      buttons.forEach(function (b) {
+        chain = chain.then(function () {
+          return updateOne(b.dataset.id, b.dataset.date).then(function (ok) {
+            if (!ok) { failures++; }
+          });
+        });
+      });
+      chain.then(function () {
+        all.textContent = failures ? (failures + ' could not be updated') : 'All dates updated';
+      });
+    }
+
+    // ---- adding transactions missing from YNAB -------------------------
+
+    function addStatus(key, text, cls) {
+      var cell = document.getElementById('addbtn-' + key).parentNode;
+      cell.innerHTML = '<span class="' + cls + '"></span>';
+      cell.firstChild.textContent = text;
+    }
+
+    function addFailure(btn, message) {
+      btn.disabled = false;
+      btn.textContent = 'Retry';
+      var cell = btn.parentNode;
+      var msg = cell.querySelector('.failed');
+      if (!msg) {
+        msg = document.createElement('div');
+        msg.className = 'failed';
+        cell.appendChild(msg);
+      }
+      msg.textContent = message;
+    }
+
+    function addOne(key) {
+      var btn = document.getElementById('addbtn-' + key);
+      // A row added on its own has had its button replaced. That is done, not
+      // failed, so Add all must not count it against the total.
+      if (!btn || btn.disabled) { return Promise.resolve(true); }
+
+      var payee = document.getElementById('payee-' + key);
+      var cat = document.getElementById('cat-' + key);
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+
+      return fetch('/add-transaction', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: TOKEN,
+          budgetID: BUDGET_ID,
+          accountID: ACCOUNT_ID,
+          date: btn.dataset.date,
+          amount: parseFloat(btn.dataset.amount),
+          payeeName: payee ? payee.value : '',
+          categoryID: cat ? cat.value : ''
+        })
+      }).then(function (r) { return r.json(); }).then(function (res) {
+        if (res.ok) {
+          // Freeze the row's inputs: the transaction now lives in YNAB, and
+          // editing these boxes would no longer change anything.
+          if (payee) { payee.disabled = true; }
+          if (cat) { cat.disabled = true; }
+          document.getElementById('add-row-' + key).classList.add('added');
+          addStatus(key, 'Added', 'done');
+          return true;
+        }
+        addFailure(btn, res.error || 'Add failed');
+        return false;
+      }).catch(function (err) {
+        addFailure(btn, 'Could not reach the server');
+        return false;
+      });
+    }
+
+    // Sequential, for the same reasons as updateAll.
+    function addAll() {
+      var buttons = Array.prototype.slice.call(document.querySelectorAll('button.fix[data-key]'));
+      var all = document.querySelectorAll('button.all');
+      var btn = all[all.length - 1];
+      btn.disabled = true;
+      btn.textContent = 'Adding...';
+
+      var chain = Promise.resolve();
+      var failures = 0;
+      buttons.forEach(function (b) {
+        chain = chain.then(function () {
+          return addOne(b.dataset.key).then(function (ok) {
+            if (!ok) { failures++; }
+          });
+        });
+      });
+      chain.then(function () {
+        btn.textContent = failures ? (failures + ' could not be added') : 'All transactions added';
+      });
+    }
+  </script>
 </body>
 </html>
