@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Compare Results</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 800px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.4rem; }
+    h2 { font-size: 1.1rem; margin-top: 2rem; border-bottom: 2px solid #eee; padding-bottom: 0.3rem; }
+    .meta { color: #555; margin-bottom: 1.5rem; }
+    .warning { background: #fff8e1; border: 1px solid #ffe08a; color: #6b5300; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    table { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+    th, td { text-align: left; padding: 0.4rem 0.6rem; border-bottom: 1px solid #eee; font-size: 0.92rem; }
+    th { background: #fafafa; }
+    .amount { text-align: right; font-variant-numeric: tabular-nums; }
+    .empty { color: #2c6e49; font-style: italic; padding: 0.5rem 0; }
+    .count { color: #888; font-weight: normal; }
+    a.back { display: inline-block; margin-top: 2rem; }
+  </style>
+</head>
+<body>
+  <h1>Comparing account: {{.AccountName}}</h1>
+  <div class="meta">Bank file: {{.BankFile}} &middot; date range: {{.RangeStart}} to {{.RangeEnd}}</div>
+
+  <h2>In bank CSV but missing from YNAB <span class="count">({{len .MissingFromYnab}})</span></h2>
+  {{if .MissingFromYnab}}
+  <table>
+    <tr><th>Date</th><th class="amount">Amount</th><th>Description</th></tr>
+    {{range .MissingFromYnab}}
+    <tr><td>{{.Date}}</td><td class="amount">{{printf "%.2f" .Amount}}</td><td>{{.Description}}</td></tr>
+    {{end}}
+  </table>
+  {{else}}
+  <div class="empty">Nothing missing — every bank entry has a matching YNAB transaction.</div>
+  {{end}}
+
+  <h2>In YNAB but missing from bank CSV <span class="count">({{len .MissingFromBank}})</span></h2>
+  {{if .MissingFromBank}}
+  <table>
+    <tr><th>Date</th><th class="amount">Amount</th><th>Payee</th><th>Memo</th></tr>
+    {{range .MissingFromBank}}
+    <tr><td>{{.Date}}</td><td class="amount">{{printf "%.2f" .Amount}}</td><td>{{.Payee}}</td><td>{{.Memo}}</td></tr>
+    {{end}}
+  </table>
+  {{else}}
+  <div class="empty">Nothing missing — every YNAB transaction in range has a matching bank entry.</div>
+  {{end}}
+
+  <a class="back" href="/">&larr; Run another comparison</a>
+</body>
+</html>

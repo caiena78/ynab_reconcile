@@ -1,0 +1,6 @@
+# Bank/credit-card exports — contain real transaction data
+*.csv
+*.CSV
+
+# Built binaries
+*.exe

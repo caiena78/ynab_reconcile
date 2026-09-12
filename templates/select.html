@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>YNAB vs Bank Compare</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 640px; margin: 2rem auto; padding: 0 1rem; color: #222; }
+    h1 { font-size: 1.4rem; }
+    label { display: block; margin-top: 1rem; font-weight: 600; }
+    select, input[type=text], input[type=number], input[type=file] {
+      width: 100%; padding: 0.4rem; margin-top: 0.25rem; box-sizing: border-box;
+      border: 1px solid #ccc; border-radius: 4px;
+    }
+    .hint { color: #666; font-size: 0.85rem; margin-top: 0.15rem; }
+    .or { margin: 0.6rem 0; color: #999; font-size: 0.85rem; text-align: center; }
+    button {
+      margin-top: 1.5rem; padding: 0.6rem 1.2rem; font-size: 1rem;
+      background: #2c6e49; color: #fff; border: none; border-radius: 4px; cursor: pointer;
+    }
+    button:hover { background: #23553a; }
+    .error { background: #fdecea; border: 1px solid #f5c2c0; color: #7a1f1a; padding: 0.75rem 1rem; border-radius: 4px; margin-bottom: 1rem; }
+    a.back { display: inline-block; margin-top: 1.5rem; font-size: 0.9rem; }
+  </style>
+</head>
+<body>
+  <h1>YNAB vs Bank Compare</h1>
+  <p>Step 2 of 2 — pick the YNAB account and the bank CSV to compare.</p>
+
+  {{if .Error}}<div class="error">{{.Error}}</div>{{end}}
+
+  <form method="post" action="/compare" enctype="multipart/form-data">
+    <input type="hidden" name="token" value="{{.Token}}">
+    <input type="hidden" name="budgetID" value="{{.BudgetID}}">
+
+    <label for="accountID">YNAB account</label>
+    <select id="accountID" name="accountID" required>
+      {{range .Accounts}}<option value="{{.ID}}">{{.Name}}</option>{{end}}
+    </select>
+
+    <label for="bankFile">Bank CSV file</label>
+    <select id="bankFile" name="bankFile">
+      <option value="">-- none, upload below instead --</option>
+      {{range .BankFiles}}<option value="{{.}}">{{.}}</option>{{end}}
+    </select>
+    <div class="hint">Files found in the server's bank-CSV folder (set via BANK_CSV_DIR).</div>
+
+    <div class="or">— or —</div>
+
+    <label for="bankcsvUpload">Upload a bank CSV</label>
+    <input type="file" id="bankcsvUpload" name="bankcsvUpload" accept=".csv">
+    <div class="hint">If chosen, this overrides the dropdown above. Supports Sam's Club ("Posting Date"/"Amount") and Citi ("Debit"/"Credit") export formats.</div>
+
+    <label for="toleranceDays">Date tolerance (days)</label>
+    <input type="number" id="toleranceDays" name="toleranceDays" value="{{.ToleranceDays}}" min="0" max="30">
+
+    <button type="submit">Compare</button>
+  </form>
+
+  <a class="back" href="/">&larr; Start over</a>
+</body>
+</html>
