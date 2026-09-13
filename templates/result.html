@@ -41,6 +41,7 @@
     .side dt { color: #777; font-size: 0.85rem; }
     .side dd { margin: 0; font-size: 0.85rem; word-break: break-word; }
     tr.added td { background: #f4faf6; }
+    .manual { color: #6b5300; font-size: 0.82rem; white-space: nowrap; border-bottom: 1px dotted #b99; cursor: help; }
     .desc { color: #555; font-size: 0.85rem; word-break: break-word; }
     .payeebox, .catbox {
       font: inherit; font-size: 0.85rem; padding: 0.25rem 0.35rem;
@@ -64,7 +65,9 @@
     change this app ever makes to your budget. Nothing else on the transaction
     is touched.
   </p>
-  <button class="fix all" type="button" onclick="updateAll()">Update all {{len .DateMismatches}} dates in YNAB</button>
+  {{if .FixableCount}}
+  <button class="fix all" type="button" onclick="updateAll()">Update all {{.FixableCount}} dates in YNAB</button>
+  {{end}}
   <table>
     <tr>
       <th></th>
@@ -86,6 +89,9 @@
       <td>{{.Description}}</td>
       <td>{{.Payee}}</td>
       <td>
+        {{if .YnabIsSplit}}
+        <span class="manual" title="YNAB's API ignores a date sent for a split transaction, so this one has to be changed in the YNAB app.">Split — fix in YNAB</span>
+        {{else}}
         <button class="fix" type="button"
                 id="btn-{{.YnabID}}"
                 data-id="{{.YnabID}}"
@@ -93,11 +99,18 @@
                 onclick="updateOne(this.dataset.id, this.dataset.date)">
           Set to {{.BankDate}}
         </button>
+        {{end}}
       </td>
     </tr>
     <tr class="detail" id="detail-{{.YnabID}}" hidden>
       <td colspan="8">
         <div class="why">
+          {{if .YnabIsSplit}}
+          <strong>This is a split transaction.</strong> YNAB's API accepts a new
+          date for a split but ignores it, so this app cannot move it — it would
+          report success while nothing changed. To align it, open this
+          transaction in YNAB and change the date to {{.BankDate}} there.
+          {{end}}
           {{if .ImportDateAgrees}}
           <strong>Same charge.</strong> YNAB imported this transaction with the
           bank's date of {{.YnabImportDate}}, which is the date in this CSV.

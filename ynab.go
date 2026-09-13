@@ -36,6 +36,10 @@ type YnabEntry struct {
 	// entered by hand. It is the strongest evidence that a YNAB row and a
 	// bank row are the same charge despite disagreeing dates.
 	ImportDate string
+	// IsSplit marks a transaction divided across categories. YNAB's API
+	// ignores a date sent for one of these, so the results page reports the
+	// mismatch without offering to fix it.
+	IsSplit bool
 }
 
 // apiError carries YNAB's status code alongside its message, so callers can
@@ -139,16 +143,19 @@ func (c *ynabClient) listTransactions(accountID string) ([]YnabEntry, error) {
 	var parsed struct {
 		Data struct {
 			Transactions []struct {
-				ID           string `json:"id"`
-				Date         string `json:"date"`
-				Amount       int64  `json:"amount"`
-				PayeeName    string `json:"payee_name"`
-				Memo         string `json:"memo"`
-				CategoryName string `json:"category_name"`
-				Cleared      string `json:"cleared"`
-				Approved     bool   `json:"approved"`
-				ImportID     string `json:"import_id"`
-				Deleted      bool   `json:"deleted"`
+				ID              string `json:"id"`
+				Date            string `json:"date"`
+				Amount          int64  `json:"amount"`
+				PayeeName       string `json:"payee_name"`
+				Memo            string `json:"memo"`
+				CategoryName    string `json:"category_name"`
+				Cleared         string `json:"cleared"`
+				Approved        bool   `json:"approved"`
+				ImportID        string `json:"import_id"`
+				Deleted         bool   `json:"deleted"`
+				Subtransactions []struct {
+					ID string `json:"id"`
+				} `json:"subtransactions"`
 			} `json:"transactions"`
 		} `json:"data"`
 	}
@@ -175,6 +182,7 @@ func (c *ynabClient) listTransactions(accountID string) ([]YnabEntry, error) {
 			Cleared:    t.Cleared,
 			Approved:   t.Approved,
 			ImportDate: importDate(t.ImportID),
+			IsSplit:    len(t.Subtransactions) > 0,
 		})
 	}
 	return result, nil

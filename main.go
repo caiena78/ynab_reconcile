@@ -70,6 +70,11 @@ type dateMismatch struct {
 	YnabCleared    string
 	YnabApproved   bool
 	YnabImportDate string
+	// YnabIsSplit marks a pair whose YNAB side is a split. The dates still
+	// disagree and the user still needs to know, but YNAB's API ignores a
+	// date sent for a split, so the page reports it instead of offering a
+	// button that could not work.
+	YnabIsSplit bool
 	// ImportDateAgrees reports whether the date the bank gave YNAB at import
 	// is the same date this CSV carries. When true, the pair is the same
 	// charge and the YNAB date was changed after import.
@@ -107,6 +112,19 @@ type resultData struct {
 	// not be fetched. The comparison itself still stands, so this is a note
 	// on the page rather than a failed run.
 	CategoryError string
+}
+
+// FixableCount is how many mismatches this app can actually write. Splits are
+// listed but not fixable, so the bulk button counts only the rest. Derived
+// rather than stored, so it cannot fall out of step with DateMismatches.
+func (r resultData) FixableCount() int {
+	n := 0
+	for _, m := range r.DateMismatches {
+		if !m.YnabIsSplit {
+			n++
+		}
+	}
+	return n
 }
 
 func main() {
@@ -743,6 +761,7 @@ func runComparison(token, budgetID, accountID, mappingName string, toleranceDays
 			YnabCleared:      y.Cleared,
 			YnabApproved:     y.Approved,
 			YnabImportDate:   y.ImportDate,
+			YnabIsSplit:      y.IsSplit,
 			ImportDateAgrees: y.ImportDate != "" && y.ImportDate == bankDate,
 		})
 	}
